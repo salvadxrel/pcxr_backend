@@ -8,6 +8,8 @@ import (
 	"log"
 	"pcxr/internal/app/logger"
 	"pcxr/internal/app/models"
+	"pcxr/pkg"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,9 +35,13 @@ type Repository interface {
 	CreateSessionDB(token string, userID int) (string, error)
 	DisableSession(token string) (*models.Session, error)
 	CheckSessionRedis(token string) (*models.Session, time.Duration, error)
-	CreateSessionRedis(session *models.Session, ttl time.Duration) error
+	CreateSessionRedis(session *models.Session, ttl time.Duration, token string) error
 	UpdateTTLRedis(token string, ttl time.Duration) error
 	DeleteSessionRedis(token string) error
+	LoadCatalogTablesAuthorized(filter *models.FilterModel, userID, limit int) ([]models.Response_Tables_Authorized, error)
+	LoadCatalogTablesGuest(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error)
+	LoadCatalogUnderframeAuthorized(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error)
+	LoadCatalogUnderframeGuest(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error)
 }
 
 func NewRepository(db *pgxpool.Pool, red *redis.Client) Repository {
@@ -244,7 +250,7 @@ func (s *repository_struct) CheckSessionTokenDB(token string) (*models.Session, 
 func (r *repository_struct) CheckSessionRedis(token string) (*models.Session, time.Duration, error) {
 	session := new(models.Session)
 	key := fmt.Sprintf("session:%s", token)
-	fmt.Printf("🔑 Redis key: %s\n", key)
+	fmt.Printf("Redis key: %s\n", key)
 	data, err := r.red.Get(context.Background(), key).Result()
 	if err == redis.Nil {
 		return nil, 0, ErrSessionNotFound
@@ -317,13 +323,13 @@ func (s *repository_struct) CreateSessionDB(token string, userID int) (string, e
 	return "", nil
 }
 
-func (r *repository_struct) CreateSessionRedis(session *models.Session, ttl time.Duration) error {
+func (r *repository_struct) CreateSessionRedis(session *models.Session, ttl time.Duration, token string) error {
 	data, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("marshal session: %w", err)
 	}
-	key := fmt.Sprintf("session:%s", session.Token)
-	fmt.Printf("🔑 Redis key: %s\n", key)
+	key := fmt.Sprintf("session:%s", token)
+	fmt.Printf("Redis key: %s\n", key)
 	if err := r.red.Set(context.Background(), key, data, ttl).Err(); err != nil {
 		return fmt.Errorf("redis set: %w", err)
 	}
@@ -356,4 +362,233 @@ func (s *repository_struct) LoginUser(email string) (*models.Login_User_Model, e
 func (r *repository_struct) DeleteSessionRedis(token string) error {
 	key := fmt.Sprintf("session:%s", token)
 	return r.red.Del(context.Background(), key).Err()
+}
+
+func (s *repository_struct) LoadCatalogTablesAuthorized(filter *models.FilterModel, userID, limit int) ([]models.Response_Tables_Authorized, error) {
+	args := []any{userID}
+	wcondition, wArgs, idx := pkg.BuildFilter(filter, 2)
+	args = append(args, wArgs...)
+	query := `SELECT 
+    t.id, p.id, t.name, t.photo, t.description,
+    t.price, t.min_height, 
+    t.max_height, 
+    t.load_capacity,
+    t.lifting_mechanism, 
+    t.height_storage_console,
+    t.type_support, 
+    t.category_id,
+    CASE WHEN cc.id IS NOT NULL THEN true ELSE false END as in_cart 
+FROM tables t
+LEFT JOIN products p ON p.tables_id = t.id
+LEFT JOIN cart c ON c.user_id = $1
+LEFT JOIN cart_config cc ON cc.cart_id = c.id AND cc.product_id = p.id`
+	if len(wcondition) > 0 {
+		query += " WHERE " + strings.Join(wcondition, " AND ")
+	}
+	order := "ASC"
+	if filter.Order != nil && *filter.Order == 1 {
+		order = "DESC"
+	}
+	query += fmt.Sprintf("\nORDER BY t.price %s", order)
+	offset := (filter.Page - 1) * limit
+	query += fmt.Sprintf("\nLIMIT $%d OFFSET $%d", idx, idx+1)
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error with loaded tables: %w", err)
+	}
+	defer rows.Close()
+	var tables []models.Response_Tables_Authorized
+	for rows.Next() {
+		var table models.Response_Tables_Authorized
+		if err := rows.Scan(
+			&table.ID,
+			&table.Product_ID,
+			&table.Name,
+			&table.Photo,
+			&table.Description,
+			&table.Price,
+			&table.Min_height,
+			&table.Max_height,
+			&table.Load_capacity,
+			&table.Lifting_mechanism,
+			&table.Height_storage_console,
+			&table.Type_support,
+			&table.Category_id,
+			&table.In_Cart,
+		); err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+	return tables, nil
+}
+
+func (s *repository_struct) LoadCatalogTablesGuest(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error) {
+	wcondition, args, idx := pkg.BuildFilter(filter, 1)
+	query := `SELECT 
+    t.id, t.name, t.photo, t.description,
+    t.price, t.min_height, 
+    t.max_height, 
+    t.load_capacity,
+    t.lifting_mechanism, 
+    t.height_storage_console,
+    t.type_support, 
+    t.category_id
+FROM tables t`
+	if len(wcondition) > 0 {
+		query += " WHERE " + strings.Join(wcondition, " AND ")
+	}
+	order := "ASC"
+	if filter.Order != nil && *filter.Order == 1 {
+		order = "DESC"
+	}
+	query += fmt.Sprintf("\nORDER BY t.price %s", order)
+	offset := (filter.Page - 1) * limit
+	query += fmt.Sprintf("\nLIMIT $%d OFFSET $%d", idx, idx+1)
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error with loaded tables: %w", err)
+	}
+	defer rows.Close()
+	var tables []models.Response_Tables_Guest
+	for rows.Next() {
+		var table models.Response_Tables_Guest
+		if err := rows.Scan(
+			&table.ID,
+			&table.Name,
+			&table.Photo,
+			&table.Description,
+			&table.Price,
+			&table.Min_height,
+			&table.Max_height,
+			&table.Load_capacity,
+			&table.Lifting_mechanism,
+			&table.Height_storage_console,
+			&table.Type_support,
+			&table.Category_id,
+		); err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+	return tables, nil
+}
+
+func (s *repository_struct) LoadCatalogUnderframeAuthorized(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error) {
+	args := []any{userID}
+	wcondition, wArgs, idx := pkg.BuildFilter(filter, 2)
+	args = append(args, wArgs...)
+	query := `SELECT 
+    u.id, p.id, u.name, u.photo, u.description,
+    u.price, u.min_height, 
+    u.max_height, 
+    u.load_capacity,
+    u.lifting_mechanism, 
+	u.type_support,
+	u.frame_width,
+	u.category_id, 
+    u.height_storage_console,
+	CASE WHEN cc.id IS NOT NULL THEN true ELSE false END as in_cart 
+FROM underframe u
+LEFT JOIN products p ON p.underframe_id = u.id
+LEFT JOIN cart c ON c.user_id = $1
+LEFT JOIN cart_config cc ON cc.cart_id = c.id AND cc.product_id = p.id
+`
+	if len(wcondition) > 0 {
+		query += " WHERE " + strings.Join(wcondition, " AND ")
+	}
+	order := "ASC"
+	if filter.Order != nil && *filter.Order == 1 {
+		order = "DESC"
+	}
+	query += fmt.Sprintf("\nORDER BY u.price %s", order)
+	offset := (filter.Page - 1) * limit
+	query += fmt.Sprintf("\nLIMIT $%d OFFSET $%d", idx, idx+1)
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error with loaded tables: %w", err)
+	}
+	defer rows.Close()
+	var underframes []models.Response_Underframe_Authorized
+	for rows.Next() {
+		var u models.Response_Underframe_Authorized
+		if err := rows.Scan(
+			&u.ID,
+			&u.Product_ID,
+			&u.Name,
+			&u.Photo,
+			&u.Description,
+			&u.Price,
+			&u.Min_height,
+			&u.Max_height,
+			&u.Load_capacity,
+			&u.Lifting_mechanism,
+			&u.Type_support,
+			&u.Frame_width,
+			&u.Category_id,
+			&u.Height_storage_console,
+			&u.In_Cart,
+		); err != nil {
+			return nil, err
+		}
+		underframes = append(underframes, u)
+	}
+	return underframes, nil
+}
+
+func (s *repository_struct) LoadCatalogUnderframeGuest(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error) {
+	wcondition, args, idx := pkg.BuildFilter(filter, 1)
+	query := `SELECT 
+    u.id, u.name, u.photo, u.description,
+    u.price, u.min_height, 
+    u.max_height, 
+    u.load_capacity,
+    u.lifting_mechanism, 
+	u.type_support,
+	u.frame_width,
+	u.category_id, 
+    u.height_storage_console
+FROM underframe u`
+	if len(wcondition) > 0 {
+		query += " WHERE " + strings.Join(wcondition, " AND ")
+	}
+	order := "ASC"
+	if filter.Order != nil && *filter.Order == 1 {
+		order = "DESC"
+	}
+	query += fmt.Sprintf("\nORDER BY u.price %s", order)
+	offset := (filter.Page - 1) * limit
+	query += fmt.Sprintf("\nLIMIT $%d OFFSET $%d", idx, idx+1)
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error with loaded tables: %w", err)
+	}
+	defer rows.Close()
+	var underframes []models.Response_Underframe_Guest
+	for rows.Next() {
+		var u models.Response_Underframe_Guest
+		if err := rows.Scan(
+			&u.ID,
+			&u.Name,
+			&u.Photo,
+			&u.Description,
+			&u.Price,
+			&u.Min_height,
+			&u.Max_height,
+			&u.Load_capacity,
+			&u.Lifting_mechanism,
+			&u.Type_support,
+			&u.Frame_width,
+			&u.Category_id,
+			&u.Height_storage_console,
+		); err != nil {
+			return nil, err
+		}
+		underframes = append(underframes, u)
+	}
+	return underframes, nil
 }

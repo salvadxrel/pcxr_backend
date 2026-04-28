@@ -6,7 +6,7 @@ type Tables struct {
 	Photo                  *string `json:"photo"`
 	Discription            int     `json:"discription"`
 	Category               int     `json:"category"`
-	Price                  int     `json:"price"`
+	Price                  float32 `json:"price"`
 	Max_height             int     `json:"max_height"`
 	Min_height             int     `json:"min_height"`
 	Load_capacity          int     `json:"load_capacity"`

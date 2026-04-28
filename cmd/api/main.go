@@ -57,6 +57,8 @@ func main() {
 	r.Post("/logout", handler.Logout)
 	r.Post("/reg", handler.CreateUser)
 	r.Post("/login", handler.LoginUser)
+	r.Get("/catalog/tables", handler.CatalogTables)
+	r.Get("/catalog/underframe", handler.CatalogUnderframe)
 	r.Get("/cart", handler.CartLoads)
 	r.Get("/addcart", handler.AddProductToCart)
 	r.Get("/removecart", handler.RemoveProductFromCart)

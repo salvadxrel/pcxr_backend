@@ -22,6 +22,10 @@ type Service interface {
 	UpdateSessionExpiryService(token string) error
 	LoginService(login *models.Login_Model) (string, error)
 	DeleteSession(token string) error
+	LoadCatalogTablesAuthorizedService(filter *models.FilterModel, userID, limit int) ([]models.Response_Tables_Authorized, error)
+	LoadCatalogTablesGuestService(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error)
+	LoadCatalogUnderframeGuestService(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error)
+	LoadCatalogUnderframeAuthorizedService(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error)
 }
 
 type service struct {
@@ -163,13 +167,13 @@ func (s *service) LoginService(login *models.Login_Model) (string, error) {
 	}
 	ttl := 240 * time.Hour
 	session := &models.Session{
-		Token:   token,
+		//Token.token
 		User_ID: user.User_ID,
 		//Expires_At: time.Now().UTC(),
 		Created_At: time.Now().UTC(),
 		Is_Active:  true,
 	}
-	if err := s.repo.CreateSessionRedis(session, ttl); err != nil {
+	if err := s.repo.CreateSessionRedis(session, ttl, token); err != nil {
 		log.Printf("Token generated, calling CreateSession for user %d", user.User_ID)
 		return "", err
 	}
@@ -181,4 +185,36 @@ func (s *service) DeleteSession(token string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *service) LoadCatalogTablesAuthorizedService(filter *models.FilterModel, userID, limit int) ([]models.Response_Tables_Authorized, error) {
+	tables, err := s.repo.LoadCatalogTablesAuthorized(filter, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return tables, nil
+}
+
+func (s *service) LoadCatalogTablesGuestService(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error) {
+	tables, err := s.repo.LoadCatalogTablesGuest(filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	return tables, nil
+}
+
+func (s *service) LoadCatalogUnderframeGuestService(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error) {
+	underframes, err := s.repo.LoadCatalogUnderframeGuest(filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	return underframes, nil
+}
+
+func (s *service) LoadCatalogUnderframeAuthorizedService(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error) {
+	underframes, err := s.repo.LoadCatalogUnderframeAuthorized(filter, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return underframes, nil
 }
