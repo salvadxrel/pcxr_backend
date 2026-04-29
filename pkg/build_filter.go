@@ -86,5 +86,11 @@ func BuildFilter(filter *models.FilterModel, startIdx int) ([]string, []any, int
 		args = append(args, *filter.Frame_width_max)
 		idx++
 	}
+	if filter.Search != nil {
+		search := "%" + *filter.Search + "%"
+		wcondition = append(wcondition, fmt.Sprintf(`name ILIKE $%d`, idx))
+		args = append(args, search)
+		idx++
+	}
 	return wcondition, args, idx
 }

@@ -298,6 +298,9 @@ func parseFilter(r *http.Request) (*models.FilterModel, error) {
 			filter.Order = &val
 		}
 	}
+	if search := q.Get("search"); search != "" {
+		filter.Search = &search
+	}
 	page := 1
 	if p := q.Get("page"); p != "" {
 		if val, err := strconv.Atoi(p); err == nil && val > 0 {

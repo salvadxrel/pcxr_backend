@@ -13,9 +13,9 @@ type FilterModel struct {
 	Load_capacity_max *int
 	Frame_width_min   *int
 	Frame_width_max   *int
-	Limit             int
 	Page              int
 	Order             *int
+	Search            *string
 }
 
 type Response_Tables_Authorized struct {
