@@ -1,15 +1,19 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"pcxr/internal/app/email"
 	"pcxr/internal/app/models"
 	"pcxr/internal/app/repository"
 	"pcxr/pkg"
 	"regexp"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,20 +30,26 @@ type Service interface {
 	LoadCatalogTablesGuestService(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error)
 	LoadCatalogUnderframeGuestService(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error)
 	LoadCatalogUnderframeAuthorizedService(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error)
+	LoadProfileService(userID int) (*models.Response_Profile, error)
+	RequestResetPassword(email string) error
+	ConfrimResetPassword(token, newPassword string) error
 }
 
 type service struct {
-	repo repository.Repository
+	repo         repository.Repository
+	email_sender email.SMTPSender
+	pool         *pgxpool.Pool
 }
 
 var (
 	ErrInvalidData     = errors.New("invalid data")
 	ErrInvalidExpires  = errors.New("token expired")
 	ErrSessionNotFound = errors.New("session not found")
+	ErrTokenUsed       = errors.New("token already used")
 )
 
-func NewService(repo repository.Repository) Service {
-	return &service{repo: repo}
+func NewService(repo repository.Repository, email_sender email.SMTPSender, pool *pgxpool.Pool) Service {
+	return &service{repo: repo, email_sender: email_sender, pool: pool}
 }
 
 func (s *service) RegisterUser(reg *models.Register_Model) error {
@@ -217,4 +227,88 @@ func (s *service) LoadCatalogUnderframeAuthorizedService(filter *models.FilterMo
 		return nil, err
 	}
 	return underframes, nil
+}
+
+func (s *service) LoadProfileService(userID int) (*models.Response_Profile, error) {
+	profile, err := s.repo.LoadProfile(userID)
+	if err != nil {
+		return nil, err
+	}
+	return profile, nil
+}
+
+func (s *service) RequestResetPassword(email string) error {
+	user, err := s.repo.GetUserByEmail(email)
+	if err != nil {
+		return err
+	}
+
+	token, err := pkg.GenerateSecureToken()
+	if err != nil {
+		return fmt.Errorf("invalid generateSecureToken:%w", err)
+	}
+	tx, err := s.pool.Begin(context.Background())
+	defer func() {
+		if err != nil {
+			tx.Rollback(context.Background())
+		}
+	}()
+	expiresAt := time.Now().Add(15 * time.Minute)
+	fmt.Printf("User found: ID=%v, Email=%s\n", user.ID, user.Email)
+	if err := s.repo.CreateResetToken(tx, user.ID, token, expiresAt); err != nil {
+		return fmt.Errorf("iternal CreateResetToken error: %w", err)
+	}
+	resetLink := os.Getenv("APP_URL") + "/reset_password/?token=" + token
+	/*err = s.email_sender.SendPasswordRest(email, resetLink)
+	if err != nil {
+		log.Printf("SMTP error: %v", err)
+	} */
+	if err := tx.Commit(context.Background()); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	go s.email_sender.SendPasswordRest(email, resetLink)
+	return nil
+}
+
+func (s *service) ConfrimResetPassword(token, newPassword string) error {
+	if len(newPassword) < 6 {
+		return errors.New("password too weak")
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback(context.Background())
+		}
+	}()
+	rec, err := s.repo.FindValid(tx, token)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.UpdatePassword(tx, string(hashed), rec.UserID); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	used, err := s.repo.MarkUsed(tx, token)
+	if err != nil {
+		return err
+	}
+	if !used {
+		return errors.New("token already used")
+	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	err = s.repo.CleanExpiredResetTokens()
+	if err != nil {
+		return err
+	}
+	return nil
 }

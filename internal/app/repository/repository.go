@@ -25,6 +25,8 @@ type repository_struct struct {
 
 type Repository interface {
 	GetUserByID(user_id int) (*models.User, error)
+	GetUserByEmail(email string) (*models.User, error)
+	UpdatePassword(tx pgx.Tx, password string, userID int) error
 	CreateUser(reg *models.Register_Model) (err error)
 	CartLoads(user_id int) ([]models.Cart_Config_Model, error)
 	AddProductToCart(user_id, product_id int) error
@@ -42,6 +44,11 @@ type Repository interface {
 	LoadCatalogTablesGuest(filter *models.FilterModel, limit int) ([]models.Response_Tables_Guest, error)
 	LoadCatalogUnderframeAuthorized(filter *models.FilterModel, userID, limit int) ([]models.Response_Underframe_Authorized, error)
 	LoadCatalogUnderframeGuest(filter *models.FilterModel, limit int) ([]models.Response_Underframe_Guest, error)
+	LoadProfile(userID int) (*models.Response_Profile, error)
+	CreateResetToken(tx pgx.Tx, userID int, token string, expiresAt time.Time) error
+	FindValid(tx pgx.Tx, token string) (*models.Reset_Token, error)
+	MarkUsed(tx pgx.Tx, token string) (bool, error)
+	CleanExpiredResetTokens() error
 }
 
 func NewRepository(db *pgxpool.Pool, red *redis.Client) Repository {
@@ -51,6 +58,7 @@ func NewRepository(db *pgxpool.Pool, red *redis.Client) Repository {
 var (
 	UserExist          = errors.New("this user already exists")
 	ErrSessionNotFound = errors.New("session not found")
+	ErrTokenNotFound   = errors.New("reset token not found")
 )
 
 func (s *repository_struct) GetUserByID(id int) (*models.User, error) {
@@ -73,6 +81,38 @@ func (s *repository_struct) GetUserByID(id int) (*models.User, error) {
 		return nil, err
 	}
 	return user, nil
+}
+
+func (s *repository_struct) GetUserByEmail(email string) (*models.User, error) {
+	user := new(models.User)
+	err := s.db.QueryRow(context.Background(),
+		`SELECT id, email, password, first_name, last_name, patronymic, phone, photo, created_at
+	FROM users
+	WHERE email = $1`, email).Scan(
+		&user.ID,
+		&user.Email,
+		&user.Password,
+		&user.First_name,
+		&user.Last_name,
+		&user.Patronymic,
+		&user.Phone,
+		&user.Photo,
+		&user.Created_at,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *repository_struct) UpdatePassword(tx pgx.Tx, password string, userID int) error {
+	_, err := tx.Exec(
+		context.Background(),
+		`UPDATE users SET password = $1 WHERE id = $2`, password, userID)
+	if err != nil {
+		return fmt.Errorf("error update password:%w", err)
+	}
+	return nil
 }
 
 func (s *repository_struct) CreateUser(reg *models.Register_Model) (err error) {
@@ -591,4 +631,98 @@ FROM underframe u`
 		underframes = append(underframes, u)
 	}
 	return underframes, nil
+}
+
+func (s *repository_struct) LoadProfile(userID int) (*models.Response_Profile, error) {
+	profile := new(models.Response_Profile)
+	err := s.db.QueryRow(
+		context.Background(),
+		`SELECT 
+    	u.email,
+		u.first_name,
+		u.last_name,
+		u.patronymic,
+		u.phone,
+		u.photo,
+		u.role,
+		u.pick_up_point_id,
+    (SELECT COUNT(*)
+     		FROM cart c
+     		JOIN cart_config cf ON c.id = cf.cart_id
+     		WHERE c.user_id = u.id) AS cart_items
+		FROM users u
+		WHERE u.id = $1;`,
+		userID).Scan(
+		&profile.Email,
+		&profile.First_name,
+		&profile.Last_name,
+		&profile.Patronymic,
+		&profile.Phone,
+		&profile.Photo,
+		&profile.Role,
+		&profile.Pick_up_point_ID,
+		&profile.Cart_Items,
+	)
+	if err != nil {
+		logger.Log.Error(err.Error())
+		return nil, err
+	}
+	return profile, nil
+}
+
+func (s *repository_struct) CreateResetToken(tx pgx.Tx, userID int, token string, expiresAt time.Time) error {
+	_, err := tx.Exec(context.Background(),
+		`UPDATE reset_token SET used = true WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("invalidate old tokens: %w", err)
+	}
+	_, err = tx.Exec(context.Background(),
+		`INSERT INTO reset_token (user_id, token, expires_at, used) 
+        VALUES ($1, $2, $3, false)`,
+		userID, token, expiresAt)
+
+	if err != nil {
+		return fmt.Errorf("create reset token: %w", err)
+	}
+	return nil
+}
+
+func (s *repository_struct) FindValid(tx pgx.Tx, token string) (*models.Reset_Token, error) {
+	t := new(models.Reset_Token)
+	err := tx.QueryRow(context.Background(),
+		`SELECT id, user_id, token, expires_at, used
+		FROM reset_token
+		WHERE token = $1 AND expires_at > NOW() AND used = false
+		LIMIT 1`, token).Scan(
+		&t.ID,
+		&t.UserID,
+		&t.Token,
+		&t.ExpiresAt,
+		&t.Used,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTokenNotFound
+		}
+		return nil, fmt.Errorf("find reset token: %w", err)
+	}
+	return t, nil
+}
+
+func (s *repository_struct) MarkUsed(tx pgx.Tx, token string) (bool, error) {
+	mark, err := tx.Exec(context.Background(),
+		`UPDATE reset_token SET used = true WHERE token = $1 AND used = false`, token)
+	if err != nil {
+		return false, fmt.Errorf("mark token user :%w", err)
+	}
+	return mark.RowsAffected() > 0, nil
+}
+
+func (s *repository_struct) CleanExpiredResetTokens() error {
+	_, err := s.db.Exec(context.Background(),
+		`DELETE FROM reset_token WHERE expires_at < NOW() OR used = true`)
+	if err != nil {
+		log.Printf("Cleanup error: %v", err)
+	}
+	return nil
 }

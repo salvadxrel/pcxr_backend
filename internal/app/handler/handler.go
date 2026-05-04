@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"pcxr/internal/app/logger"
 	"pcxr/internal/app/models"
+	"pcxr/internal/app/repository"
 	"pcxr/internal/app/service"
 	"strconv"
 	"strings"
@@ -235,6 +236,70 @@ func (s *handler) CatalogUnderframe(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-type", "application/json")
 		json.NewEncoder(w).Encode(tables)
+	}
+}
+
+func (s *handler) LoadProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	profile, err := s.serv.LoadProfileService(userID)
+	if err != nil {
+		http.Error(w, "iternal server error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(profile)
+}
+
+func (s *handler) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		fmt.Println("Decode error:", err)
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	fmt.Println("Received email:", req.Email)
+	if err := s.serv.RequestResetPassword(req.Email); err != nil {
+		fmt.Println("RequestResetPassword error:", err)
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Check your email"})
+}
+
+func (s *handler) ConfrimPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "Missing or invalid token", http.StatusBadRequest)
+		return
+	}
+	if req.NewPassword == "" {
+		http.Error(w, "The password field is empty", http.StatusBadRequest)
+		return
+	}
+	err := s.serv.ConfrimResetPassword(token, req.NewPassword)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+	case errors.Is(err, repository.ErrTokenNotFound) || errors.Is(err, service.ErrTokenUsed):
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+	default:
+		log.Printf("Password reset failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
 	}
 }
 

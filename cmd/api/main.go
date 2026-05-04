@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"pcxr/internal/app/database"
+	"pcxr/internal/app/email"
 	"pcxr/internal/app/handler"
 	"pcxr/internal/app/logger"
 	"pcxr/internal/app/models"
@@ -48,8 +49,14 @@ func main() {
 		panic(err)
 	}
 	defer db.Close()
+	emailSender := email.NewSMTPSender(
+		os.Getenv("SMTP_HOST"),
+		587,
+		os.Getenv("EMAIL"),
+		os.Getenv("PASSWORD_MAIL"),
+	)
 	repository := repository.NewRepository(db, cfgRedis)
-	service := service.NewService(repository)
+	service := service.NewService(repository, *emailSender, db)
 	handler := handler.NewHandler(service /*, cfgRedis*/)
 
 	r := chi.NewRouter()
@@ -57,10 +64,13 @@ func main() {
 	r.Post("/logout", handler.Logout)
 	r.Post("/reg", handler.CreateUser)
 	r.Post("/login", handler.LoginUser)
+	r.Post("/forgot_password", handler.RequestPasswordReset)
+	r.Post("/reset_password", handler.ConfrimPasswordReset)
 	r.Get("/catalog/tables", handler.CatalogTables)
 	r.Get("/catalog/underframe", handler.CatalogUnderframe)
 	r.Get("/cart", handler.CartLoads)
 	r.Get("/addcart", handler.AddProductToCart)
 	r.Get("/removecart", handler.RemoveProductFromCart)
+	r.Get("/profile", handler.LoadProfile)
 	http.ListenAndServe(":1337", r)
 }
