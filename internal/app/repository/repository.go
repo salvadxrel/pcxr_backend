@@ -27,6 +27,7 @@ type Repository interface {
 	GetUserByID(user_id int) (*models.User, error)
 	GetUserByEmail(email string) (*models.User, error)
 	UpdatePassword(tx pgx.Tx, password string, userID int) error
+	UpdatePasswordProfile(password string, userID int) error
 	CreateUser(reg *models.Register_Model) (err error)
 	CartLoads(user_id int) ([]models.Cart_Config_Model, error)
 	AddProductToCart(user_id, product_id int) error
@@ -49,6 +50,12 @@ type Repository interface {
 	FindValid(tx pgx.Tx, token string) (*models.Reset_Token, error)
 	MarkUsed(tx pgx.Tx, token string) (bool, error)
 	CleanExpiredResetTokens() error
+	GetAllPickUpPoints(userID int) ([]models.PickUpPoint_Model, error)
+	SavePickUpPoint(userID, pickupID int) error
+	ChangeUserData(data *models.ChangeUserData, userID int) error
+	GetAllOrders(userID int) ([]models.OrderRequest, error)
+	GetInfoOrder(userID int, orderToken string) ([]models.OrderInfoRequest, error)
+	AddOrder(userID, point_id int, orderToken string) error
 }
 
 func NewRepository(db *pgxpool.Pool, red *redis.Client) Repository {
@@ -107,6 +114,16 @@ func (s *repository_struct) GetUserByEmail(email string) (*models.User, error) {
 
 func (s *repository_struct) UpdatePassword(tx pgx.Tx, password string, userID int) error {
 	_, err := tx.Exec(
+		context.Background(),
+		`UPDATE users SET password = $1 WHERE id = $2`, password, userID)
+	if err != nil {
+		return fmt.Errorf("error update password:%w", err)
+	}
+	return nil
+}
+
+func (s *repository_struct) UpdatePasswordProfile(password string, userID int) error {
+	_, err := s.db.Exec(
 		context.Background(),
 		`UPDATE users SET password = $1 WHERE id = $2`, password, userID)
 	if err != nil {
@@ -723,6 +740,194 @@ func (s *repository_struct) CleanExpiredResetTokens() error {
 		`DELETE FROM reset_token WHERE expires_at < NOW() OR used = true`)
 	if err != nil {
 		log.Printf("Cleanup error: %v", err)
+	}
+	return nil
+}
+
+func (s *repository_struct) GetAllPickUpPoints(userID int) ([]models.PickUpPoint_Model, error) {
+	var items []models.PickUpPoint_Model
+	req, err := s.db.Query(context.Background(),
+		`SELECT
+			p.id,
+			p.name,
+			p.address,
+			p.openning_hours,
+			(SELECT pick_up_point_id FROM users WHERE id = $1) AS default_point
+		FROM pick_up_point p
+		ORDER BY p.id ASC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer req.Close()
+	for req.Next() {
+		var item models.PickUpPoint_Model
+		err := req.Scan(
+			&item.ID,
+			&item.Name,
+			&item.Address,
+			&item.OpeningHours,
+			&item.DefaultPoint,
+		)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *repository_struct) SavePickUpPoint(userID, pickupID int) error {
+	_, err := s.db.Exec(context.Background(), `UPDATE users SET pick_up_point_id = $1 WHERE id = $2`, pickupID, userID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *repository_struct) ChangeUserData(data *models.ChangeUserData, userID int) error {
+	_, err := s.db.Exec(context.Background(),
+		`UPDATE users SET email = $1, first_name = $2, last_name = $3, patronymic = $4, phone = $5 WHERE id = $6`,
+		data.Email, data.First_name, data.Last_name, data.Patronymic, data.Phone, userID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *repository_struct) GetAllOrders(userID int) ([]models.OrderRequest, error) {
+	var items []models.OrderRequest
+	req, err := s.db.Query(context.Background(),
+		`SELECT o.order_token, s.name, o.date, o.sum FROM "order" o
+		JOIN status_order s ON o.status_order_id = s.id
+		WHERE user_id = $1
+		ORDER BY date DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer req.Close()
+	for req.Next() {
+		var item models.OrderRequest
+		err := req.Scan(
+			&item.Order_token,
+			&item.Status,
+			&item.Date,
+			&item.Sum,
+		)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (r *repository_struct) GetInfoOrder(userID int, orderToken string) ([]models.OrderInfoRequest, error) {
+	var items []models.OrderInfoRequest
+	rows, err := r.db.Query(
+		context.Background(),
+		`SELECT 
+			t.photo as table_photo,
+			tt.photo as tabletop_photo,
+			u.photo as underframe_photo,
+			p.name, 
+			p.price, 
+			op.quantity, 
+			o.sum, 
+			o.date 
+		FROM order_products op
+		JOIN "order" o ON op.order_id = o.id
+		JOIN products p ON op.product_id = p.id
+		LEFT JOIN tables t ON p.tables_id = t.id
+		LEFT JOIN tabletop tt ON p.tabletop_id = tt.id
+		LEFT JOIN underframe u ON p.underframe_id = u.id
+		WHERE o.user_id = $1 AND o.order_token = $2`,
+		userID, orderToken,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		var item models.OrderInfoRequest
+		err := rows.Scan(
+			&item.Photo,
+			&item.Name,
+			&item.Price,
+			&item.Quantity,
+			&item.Sum,
+			&item.Date,
+		)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (r *repository_struct) AddOrder(userID, point_id int, orderToken string) error {
+	var order_id int
+	ctx := context.Background()
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	fmt.Println(point_id)
+	err = tx.QueryRow(
+		ctx,
+		`WITH cartid AS (
+    SELECT id FROM cart WHERE user_id = $1
+),
+cart_total AS (
+    SELECT COALESCE(SUM(
+        COALESCE(t.price, tb.price, u.price, 0) * cc.quantity
+    ), 0) as total_sum
+    FROM cart_config cc
+    JOIN products p ON cc.product_id = p.id
+    LEFT JOIN tables t ON p.tables_id = t.id
+    LEFT JOIN tabletop tb ON p.tabletop_id = tb.id
+    LEFT JOIN underframe u ON p.underframe_id = u.id
+    WHERE cc.cart_id = (SELECT id FROM cartid)
+)
+INSERT INTO "order" (order_token, status_order_id, user_id, date, sum, pick_up_point_id)
+VALUES ($2, $3, $1, NOW(), (SELECT total_sum FROM cart_total), $4) RETURNING id;`,
+		userID,
+		orderToken,
+		1,
+		point_id,
+	).Scan(&order_id)
+	if err != nil {
+		return fmt.Errorf("failed to insert order: %w", err)
+	}
+	_, err = tx.Exec(
+		ctx,
+		`INSERT INTO order_products (order_id, product_id, quantity, price)
+		SELECT $1,
+			cc.product_id,
+			cc.quantity,
+			COALESCE(t.price, tb.price, u.price, 0)
+		FROM cart_config cc
+		JOIN products p ON cc.product_id = p.id
+		LEFT JOIN tables t ON p.tables_id = t.id
+		LEFT JOIN tabletop tb ON p.tabletop_id = tb.id
+		LEFT JOIN underframe u ON p.underframe_id = u.id
+		WHERE cc.cart_id = (SELECT id FROM cart WHERE user_id = $2);`,
+		order_id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to insert order products: %w", err)
+	}
+	err = tx.Commit(ctx)
+	if err != nil {
+		return err
 	}
 	return nil
 }

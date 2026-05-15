@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,6 +34,13 @@ type Service interface {
 	LoadProfileService(userID int) (*models.Response_Profile, error)
 	RequestResetPassword(email string) error
 	ConfrimResetPassword(token, newPassword string) error
+	ChangePasswordProfile(newPassword, oldPassword string, userID int) error
+	GetPickUpPointService(userID int) ([]models.PickUpPoint_Model, error)
+	SavePickUpPointService(userID, pickupID int) error
+	ChangeUserDataService(data *models.ChangeUserData, userID int) error
+	GetOrdersService(userID int) ([]models.OrderRequest, error)
+	GetInfoOrderService(userID int, orderToken string) ([]models.OrderInfoRequest, error)
+	AddOrderService(userID, point_id int) (string, error)
 }
 
 type service struct {
@@ -311,4 +319,72 @@ func (s *service) ConfrimResetPassword(token, newPassword string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *service) ChangePasswordProfile(newPassword, oldPassword string, userID int) error {
+	if len(newPassword) < 6 {
+		return ErrInvalidData
+	}
+	user, err := s.repo.GetUserByID(userID)
+	if err != nil {
+		return fmt.Errorf("iternal server error: %w", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(oldPassword)); err != nil {
+		log.Printf("Password comparison failed: %v", err)
+		return ErrInvalidData
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		return fmt.Errorf("generate hash error: %w", err)
+	}
+	if err := s.repo.UpdatePasswordProfile(string(hash), userID); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	return nil
+}
+
+func (s *service) GetPickUpPointService(userID int) ([]models.PickUpPoint_Model, error) {
+	req, err := s.repo.GetAllPickUpPoints(userID)
+	if err != nil {
+		return nil, fmt.Errorf("get pick up points error: %w", err)
+	}
+	return req, nil
+}
+
+func (s *service) SavePickUpPointService(userID, pickupID int) error {
+	if err := s.repo.SavePickUpPoint(userID, pickupID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *service) ChangeUserDataService(data *models.ChangeUserData, userID int) error {
+	if err := s.repo.ChangeUserData(data, userID); err != nil {
+		return fmt.Errorf("internal server error ChangeUserData: %w", err)
+	}
+	return nil
+}
+
+func (s *service) GetOrdersService(userID int) ([]models.OrderRequest, error) {
+	req, err := s.repo.GetAllOrders(userID)
+	if err != nil {
+		return nil, fmt.Errorf("get orders error: %w", err)
+	}
+	return req, nil
+}
+
+func (s *service) GetInfoOrderService(userID int, orderToken string) ([]models.OrderInfoRequest, error) {
+	req, err := s.repo.GetInfoOrder(userID, orderToken)
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+func (s *service) AddOrderService(userID, point_id int) (string, error) {
+	orderToken := "PCXR" + uuid.New().String()[1:11]
+	err := s.repo.AddOrder(userID, point_id, orderToken)
+	if err != nil {
+		return "", err
+	}
+	return orderToken, nil
 }

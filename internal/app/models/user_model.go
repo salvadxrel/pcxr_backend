@@ -13,3 +13,11 @@ type User struct {
 	Photo      *string   `json:"photo"`
 	Created_at time.Time `json:"created_at"`
 }
+
+type ChangeUserData struct {
+	First_name string  `json:"first_name"`
+	Last_name  *string `json:"last_name"`
+	Patronymic *string `json:"patronymic"`
+	Phone      *string `json:"phone"`
+	Email      string  `json:"email"`
+}

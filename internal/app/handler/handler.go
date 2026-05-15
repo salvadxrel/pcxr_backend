@@ -303,6 +303,153 @@ func (s *handler) ConfrimPasswordReset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *handler) ChangePasswordProfile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OldPassword string
+		NewPassword string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := s.serv.ChangePasswordProfile(req.OldPassword, req.NewPassword, userID); err != nil {
+		logger.Log.Error(err.Error())
+		if errors.Is(err, service.ErrInvalidData) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		} else {
+			http.Error(w, "Unauthorized", http.StatusUnprocessableEntity)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *handler) GetPickUpPoint(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	req, err := s.serv.GetPickUpPointService(userID)
+	if err != nil {
+		logger.Log.Error(err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(req)
+}
+
+func (s *handler) SavePickUpPoint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID int
+	}
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	defer r.Body.Close()
+	json.NewDecoder(r.Body).Decode(&req)
+	if err := s.serv.SavePickUpPointService(userID, req.ID); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (h *handler) ChangeUserData(w http.ResponseWriter, r *http.Request) {
+	var data models.ChangeUserData
+	json.NewDecoder(r.Body).Decode(&data)
+	defer r.Body.Close()
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.serv.ChangeUserDataService(&data, userID); err != nil {
+		logger.Log.Error(err.Error())
+		http.Error(w, "Unauthorized", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *handler) GetOrders(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	req, err := s.serv.GetOrdersService(userID)
+	if err != nil {
+		logger.Log.Error(err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(req)
+}
+
+func (h *handler) GetInfoOrder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Order_token string
+	}
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	defer r.Body.Close()
+
+	info, err := h.serv.GetInfoOrderService(userID, req.Order_token)
+	if err != nil {
+		logger.Log.Error(err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(info)
+}
+
+func (h *handler) AddOrder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pick_Up_Point_ID int `json:"pick_up_point_id"`
+	}
+	defer r.Body.Close()
+	userID, ok := r.Context().Value("userID").(int)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	token, err := h.serv.AddOrderService(userID, req.Pick_Up_Point_ID)
+	if err != nil {
+		logger.Log.Error(err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{
+		"order_code": token,
+	})
+	w.WriteHeader(http.StatusOK)
+}
+
 func parseFilter(r *http.Request) (*models.FilterModel, error) {
 	q := r.URL.Query()
 	filter := new(models.FilterModel)
